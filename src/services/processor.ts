@@ -1,4 +1,4 @@
-import { db, type Meeting, type Slide, type TranscriptSegment } from './db'
+import { db, type Slide, type TranscriptSegment } from './db'
 import { transcribeAudio } from './whisper'
 import { generateSummary, generateSlideCaption } from './ai'
 

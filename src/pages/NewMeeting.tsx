@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Camera, Square, Mic, X, Check } from 'lucide-react'
+import { Camera, Mic, X, Check } from 'lucide-react'
 import { db, type Photo } from '../services/db'
 import { useMeetingStore } from '../store/meetingStore'
 import { processMeeting, type ProcessProgress } from '../services/processor'
