@@ -16,11 +16,11 @@ async function transcribeChunk(blob: Blob, offset: number = 0): Promise<WhisperR
   const formData = new FormData()
   formData.append('file', blob, 'audio.webm')
   formData.append('model', 'whisper-large-v3')
-  formData.append('language', 'zh')
+  // Do NOT force language=zh — let Whisper auto-detect
+  // Forcing zh causes garbage output when there's noise, silence, or non-Chinese speech
   formData.append('response_format', 'verbose_json')
   formData.append('timestamp_granularities[]', 'segment')
-  // Prompt hints Whisper to output Traditional Chinese (繁體中文)
-  // Use natural text that won't appear as a prefix in the output
+  // Prompt biases Whisper toward Traditional Chinese without forcing it
   formData.append('prompt', '這是一場在臺灣舉辦的會議。')
 
   const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {

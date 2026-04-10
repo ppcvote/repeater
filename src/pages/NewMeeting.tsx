@@ -4,6 +4,7 @@ import { Camera, CameraOff, Mic, X, Check } from 'lucide-react'
 import { db, type Photo } from '../services/db'
 import { useMeetingStore } from '../store/meetingStore'
 import { processMeeting, type ProcessProgress } from '../services/processor'
+import { createFilteredStream } from '../services/audioFilter'
 
 function formatTime(sec: number) {
   const h = Math.floor(sec / 3600)
@@ -32,26 +33,19 @@ export default function NewMeeting() {
   const recordingStartRef = useRef<number>(0)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const animFrameRef = useRef<number>(0)
+  const filterCleanupRef = useRef<(() => void) | null>(null)
 
   // Audio level monitoring for waveform visualization
-  const startAudioMonitor = (stream: MediaStream) => {
-    try {
-      const ctx = new AudioContext()
-      const source = ctx.createMediaStreamSource(stream)
-      const analyser = ctx.createAnalyser()
-      analyser.fftSize = 256
-      source.connect(analyser)
-      analyserRef.current = analyser
-
-      const data = new Uint8Array(analyser.frequencyBinCount)
-      const update = () => {
-        analyser.getByteFrequencyData(data)
-        const avg = data.reduce((a, b) => a + b, 0) / data.length
-        setAudioLevel(avg / 255)
-        animFrameRef.current = requestAnimationFrame(update)
-      }
-      update()
-    } catch { /* AudioContext not supported */ }
+  const startAudioMonitor = (analyser: AnalyserNode) => {
+    analyserRef.current = analyser
+    const data = new Uint8Array(analyser.frequencyBinCount)
+    const update = () => {
+      analyser.getByteFrequencyData(data)
+      const avg = data.reduce((a, b) => a + b, 0) / data.length
+      setAudioLevel(avg / 255)
+      animFrameRef.current = requestAnimationFrame(update)
+    }
+    update()
   }
 
   // Start recording — audio only by default
@@ -72,16 +66,20 @@ export default function NewMeeting() {
       stream.getVideoTracks().forEach(t => { t.enabled = false })
 
       audioStreamRef.current = stream
-      videoStreamRef.current = stream // same stream, video just disabled
+      videoStreamRef.current = stream
+
+      // Apply noise reduction filter to audio
+      const audioOnly = new MediaStream(stream.getAudioTracks())
+      const { filteredStream, analyser, cleanup } = createFilteredStream(audioOnly)
+      filterCleanupRef.current = cleanup
 
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
           ? 'audio/mp4'
           : ''
-      // Record only audio tracks
-      const audioOnly = new MediaStream(stream.getAudioTracks())
-      const recorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined)
+      // Record the filtered audio (noise-reduced)
+      const recorder = new MediaRecorder(filteredStream, mimeType ? { mimeType } : undefined)
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
@@ -90,7 +88,7 @@ export default function NewMeeting() {
       recorder.start(1000)
       mediaRecorderRef.current = recorder
 
-      startAudioMonitor(audioOnly)
+      startAudioMonitor(analyser)
     } catch (err) {
       console.error('Permission error:', err)
       // Fallback: try audio-only if camera denied
@@ -98,18 +96,21 @@ export default function NewMeeting() {
         const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
         audioStreamRef.current = audioStream
 
+        const { filteredStream, analyser, cleanup } = createFilteredStream(audioStream)
+        filterCleanupRef.current = cleanup
+
         const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
           ? 'audio/webm;codecs=opus'
           : MediaRecorder.isTypeSupported('audio/mp4')
             ? 'audio/mp4'
             : ''
-        const recorder = new MediaRecorder(audioStream, mimeType ? { mimeType } : undefined)
+        const recorder = new MediaRecorder(filteredStream, mimeType ? { mimeType } : undefined)
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) audioChunksRef.current.push(e.data)
         }
         recorder.start(1000)
         mediaRecorderRef.current = recorder
-        startAudioMonitor(audioStream)
+        startAudioMonitor(analyser)
       } catch (err2) {
         console.error('Mic error:', err2)
         alert('無法存取麥克風，請到設定中允許權限後重試。')
@@ -127,6 +128,45 @@ export default function NewMeeting() {
       status: 'recording',
       photos: [],
     })
+  }
+
+  // Pinch-to-zoom on camera
+  const handleZoom = async (scale: number) => {
+    const stream = videoStreamRef.current
+    if (!stream) return
+    const track = stream.getVideoTracks()[0]
+    if (!track) return
+    try {
+      const capabilities = track.getCapabilities() as any
+      if (capabilities.zoom) {
+        const min = capabilities.zoom.min || 1
+        const max = capabilities.zoom.max || 5
+        const zoom = Math.min(max, Math.max(min, scale))
+        await track.applyConstraints({ advanced: [{ zoom } as any] })
+      }
+    } catch { /* zoom not supported */ }
+  }
+
+  const pinchRef = useRef({ startDist: 0, startZoom: 1, currentZoom: 1 })
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      pinchRef.current.startDist = Math.hypot(dx, dy)
+      pinchRef.current.startZoom = pinchRef.current.currentZoom
+    }
+  }
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      const dist = Math.hypot(dx, dy)
+      const scale = (dist / pinchRef.current.startDist) * pinchRef.current.startZoom
+      pinchRef.current.currentZoom = scale
+      handleZoom(scale)
+    }
   }
 
   // Toggle camera on/off — just enable/disable existing video track (no new getUserMedia)
@@ -192,6 +232,7 @@ export default function NewMeeting() {
 
     if (timerRef.current) clearInterval(timerRef.current)
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+    filterCleanupRef.current?.()
 
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop()
@@ -234,6 +275,7 @@ export default function NewMeeting() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+      filterCleanupRef.current?.()
       audioStreamRef.current?.getTracks().forEach(t => t.stop())
       videoStreamRef.current?.getTracks().forEach(t => t.stop())
       if (mediaRecorderRef.current?.state === 'recording') {
@@ -349,7 +391,9 @@ export default function NewMeeting() {
               autoPlay
               playsInline
               muted
-              className="w-full h-full object-cover"
+              className="w-full h-full object-cover touch-none"
+              onTouchStart={onTouchStart}
+              onTouchMove={onTouchMove}
             />
             {/* Photo count overlay */}
             <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1 flex items-center gap-1.5">
