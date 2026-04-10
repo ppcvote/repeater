@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Camera, Mic, X, Check } from 'lucide-react'
+import { Camera, CameraOff, Mic, X, Check } from 'lucide-react'
 import { db, type Photo } from '../services/db'
 import { useMeetingStore } from '../store/meetingStore'
 import { processMeeting, type ProcessProgress } from '../services/processor'
@@ -19,36 +19,51 @@ export default function NewMeeting() {
   const [title, setTitle] = useState(`會議 ${new Date().toLocaleDateString('zh-TW')}`)
   const [showConfirmStop, setShowConfirmStop] = useState(false)
   const [photos, setPhotos] = useState<Photo[]>([])
+  const [cameraOn, setCameraOn] = useState(false)
+  const [audioLevel, setAudioLevel] = useState(0)
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const videoRef = useRef<HTMLVideoElement>(null)
-  const streamRef = useRef<MediaStream | null>(null)
+  const audioStreamRef = useRef<MediaStream | null>(null)
+  const videoStreamRef = useRef<MediaStream | null>(null)
   const meetingIdRef = useRef<string>('')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const recordingStartRef = useRef<number>(0)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const animFrameRef = useRef<number>(0)
 
-  // Start recording — request camera + mic in ONE getUserMedia call (iOS requires this)
+  // Audio level monitoring for waveform visualization
+  const startAudioMonitor = (stream: MediaStream) => {
+    try {
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      analyserRef.current = analyser
+
+      const data = new Uint8Array(analyser.frequencyBinCount)
+      const update = () => {
+        analyser.getByteFrequencyData(data)
+        const avg = data.reduce((a, b) => a + b, 0) / data.length
+        setAudioLevel(avg / 255)
+        animFrameRef.current = requestAnimationFrame(update)
+      }
+      update()
+    } catch { /* AudioContext not supported */ }
+  }
+
+  // Start recording — audio only by default
   const handleStart = async () => {
     meetingIdRef.current = crypto.randomUUID()
     audioChunksRef.current = []
     recordingStartRef.current = Date.now()
 
     try {
-      // iOS Safari: MUST request audio + video together, separate calls cause black screen
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-      })
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      audioStreamRef.current = stream
 
-      // Set up camera preview
-      streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play().catch(() => {}) // iOS needs explicit play()
-      }
-
-      // Set up audio recording from the same stream
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
@@ -62,18 +77,17 @@ export default function NewMeeting() {
 
       recorder.start(1000)
       mediaRecorderRef.current = recorder
+
+      startAudioMonitor(stream)
     } catch (err) {
-      console.error('Permission error:', err)
-      alert('無法存取相機或麥克風，請到設定中允許權限後重試。')
+      console.error('Mic error:', err)
+      alert('無法存取麥克風，請到設定中允許權限後重試。')
       return
     }
 
     startRecording()
-
-    // Timer
     timerRef.current = setInterval(tick, 1000)
 
-    // Save initial meeting record
     await db.meetings.put({
       id: meetingIdRef.current,
       title,
@@ -83,9 +97,36 @@ export default function NewMeeting() {
     })
   }
 
+  // Toggle camera on/off
+  const toggleCamera = async () => {
+    if (cameraOn) {
+      // Turn off camera
+      videoStreamRef.current?.getTracks().forEach(t => t.stop())
+      videoStreamRef.current = null
+      if (videoRef.current) videoRef.current.srcObject = null
+      setCameraOn(false)
+    } else {
+      // Turn on camera
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+        })
+        videoStreamRef.current = stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          await videoRef.current.play().catch(() => {})
+        }
+        setCameraOn(true)
+      } catch (err) {
+        console.error('Camera error:', err)
+        alert('無法開啟相機，請檢查權限設定。')
+      }
+    }
+  }
+
   // Take photo
   const handlePhoto = () => {
-    if (!videoRef.current || !streamRef.current) return
+    if (!videoRef.current || !videoStreamRef.current) return
 
     const video = videoRef.current
     const canvas = document.createElement('canvas')
@@ -109,7 +150,6 @@ export default function NewMeeting() {
       setPhotos(prev => [...prev, photo])
       addPhoto()
 
-      // Update meeting in DB
       const meeting = await db.meetings.get(meetingIdRef.current)
       if (meeting) {
         await db.meetings.update(meetingIdRef.current, {
@@ -123,21 +163,20 @@ export default function NewMeeting() {
   const handleStop = async () => {
     setShowConfirmStop(false)
 
-    // Stop timer
     if (timerRef.current) clearInterval(timerRef.current)
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
 
-    // Stop recorder and all tracks (audio + video are on same stream)
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop()
     }
-    streamRef.current?.getTracks().forEach(t => t.stop())
+    audioStreamRef.current?.getTracks().forEach(t => t.stop())
+    videoStreamRef.current?.getTracks().forEach(t => t.stop())
 
     stopRecording()
+    setCameraOn(false)
 
-    // Wait a tick for final data
     await new Promise(r => setTimeout(r, 500))
 
-    // Save audio — use recorder's actual mimeType for correct format
     const recorderMime = mediaRecorderRef.current?.mimeType || 'audio/webm'
     const audioBlob = new Blob(audioChunksRef.current, { type: recorderMime })
     const duration = Math.floor((Date.now() - recordingStartRef.current) / 1000)
@@ -149,7 +188,6 @@ export default function NewMeeting() {
       title,
     })
 
-    // Start processing
     const id = meetingIdRef.current
     setProcessing({ step: 'saving', message: '儲存錄音...', percent: 5 })
 
@@ -168,10 +206,11 @@ export default function NewMeeting() {
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
-      streamRef.current?.getTracks().forEach(t => t.stop())
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+      audioStreamRef.current?.getTracks().forEach(t => t.stop())
+      videoStreamRef.current?.getTracks().forEach(t => t.stop())
       if (mediaRecorderRef.current?.state === 'recording') {
         mediaRecorderRef.current.stop()
-        mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop())
       }
     }
   }, [])
@@ -183,7 +222,6 @@ export default function NewMeeting() {
         <div className="w-full bg-surface rounded-2xl p-8">
           <h2 className="font-heading text-xl font-bold text-gold mb-6 text-center">處理中</h2>
 
-          {/* Progress bar */}
           <div className="w-full bg-navy rounded-full h-3 mb-4">
             <div
               className="bg-gold h-3 rounded-full transition-all duration-500"
@@ -194,7 +232,6 @@ export default function NewMeeting() {
           <p className="text-center text-sm text-text-dim">{processing.message}</p>
           <p className="text-center text-xs text-text-dim mt-2">{processing.percent}%</p>
 
-          {/* Steps */}
           <div className="mt-6 space-y-2 text-sm">
             {[
               { key: 'saving', label: '儲存錄音' },
@@ -232,11 +269,10 @@ export default function NewMeeting() {
     )
   }
 
-  // Not recording yet
+  // Not recording yet — start screen
   if (!isRecording) {
     return (
       <div className="animate-fadeIn flex flex-col items-center justify-center min-h-dvh p-6 max-w-lg mx-auto">
-        {/* Title input */}
         <input
           value={title}
           onChange={e => setTitle(e.target.value)}
@@ -244,7 +280,6 @@ export default function NewMeeting() {
           placeholder="會議標題"
         />
 
-        {/* Start button */}
         <button
           onClick={handleStart}
           className="w-32 h-32 rounded-full bg-surface border-4 border-gold/30 flex items-center justify-center hover:border-gold hover:scale-105 active:scale-95 transition-all"
@@ -260,7 +295,7 @@ export default function NewMeeting() {
     )
   }
 
-  // Recording state
+  // ====== Recording state ======
   return (
     <div className="flex flex-col h-dvh max-w-lg mx-auto">
       {/* Top bar */}
@@ -278,44 +313,106 @@ export default function NewMeeting() {
         </button>
       </div>
 
-      {/* Camera viewfinder */}
-      <div className="relative flex-1 bg-black">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-full h-full object-cover"
-        />
+      {/* Main area: Camera OR Audio Visualizer */}
+      <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+        {cameraOn ? (
+          <>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
+            {/* Photo count overlay */}
+            <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1 flex items-center gap-1.5">
+              <Camera className="w-4 h-4 text-white" />
+              <span className="text-white text-sm font-bold">{photoCount}</span>
+            </div>
+          </>
+        ) : (
+          /* Audio waveform visualizer */
+          <div className="flex flex-col items-center justify-center gap-6 w-full px-8">
+            {/* Waveform bars */}
+            <div className="flex items-center justify-center gap-1 h-32">
+              {Array.from({ length: 32 }).map((_, i) => {
+                const dist = Math.abs(i - 16) / 16
+                const base = 0.08
+                const height = base + audioLevel * (1 - dist * 0.6) * (0.5 + Math.random() * 0.5)
+                return (
+                  <div
+                    key={i}
+                    className="w-1.5 rounded-full bg-gold transition-all duration-75"
+                    style={{ height: `${Math.max(4, height * 128)}px`, opacity: 0.4 + audioLevel * 0.6 }}
+                  />
+                )
+              })}
+            </div>
 
-        {/* Photo count */}
-        <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1 flex items-center gap-1.5">
-          <Camera className="w-4 h-4 text-white" />
-          <span className="text-white text-sm font-bold">{photoCount}</span>
-        </div>
+            {/* Timer */}
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-rec animate-blink" />
+              <span className="font-mono text-3xl font-bold text-text tracking-wider">
+                {formatTime(elapsedSeconds)}
+              </span>
+            </div>
+
+            <p className="text-text-dim text-sm">錄音中，可以專心聽講</p>
+
+            {/* Photo count if any */}
+            {photoCount > 0 && (
+              <p className="text-text-dim text-xs flex items-center gap-1">
+                <Camera className="w-3 h-3" /> 已拍 {photoCount} 張投影片
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Bottom: Timer + Shutter + Photo strip */}
+      {/* Bottom bar */}
       <div className="bg-surface p-3 pb-[env(safe-area-inset-bottom,12px)]">
-        {/* Timer + Shutter row */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-rec animate-blink" />
-            <span className="font-mono text-lg font-bold text-text tracking-wider">
-              REC {formatTime(elapsedSeconds)}
-            </span>
+        {/* Controls row */}
+        <div className="flex items-center justify-between mb-2">
+          {/* Timer (compact, shown when camera is on) */}
+          {cameraOn && (
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-rec animate-blink" />
+              <span className="font-mono text-sm font-bold text-text">
+                REC {formatTime(elapsedSeconds)}
+              </span>
+            </div>
+          )}
+          {!cameraOn && <div />}
+
+          {/* Action buttons */}
+          <div className="flex items-center gap-3">
+            {/* Camera toggle */}
+            <button
+              onClick={toggleCamera}
+              className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
+                cameraOn
+                  ? 'bg-gold/20 text-gold'
+                  : 'bg-surface-light text-text-dim'
+              }`}
+            >
+              {cameraOn ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
+            </button>
+
+            {/* Shutter button (only when camera is on) */}
+            {cameraOn && (
+              <button
+                onClick={handlePhoto}
+                className="w-14 h-14 rounded-full bg-white/90 border-4 border-white flex items-center justify-center active:scale-90 transition-transform shadow-lg"
+              >
+                <Camera className="w-6 h-6 text-navy" />
+              </button>
+            )}
           </div>
-          <button
-            onClick={handlePhoto}
-            className="w-14 h-14 rounded-full bg-white/90 border-4 border-white flex items-center justify-center active:scale-90 transition-transform shadow-lg"
-          >
-            <Camera className="w-6 h-6 text-navy" />
-          </button>
         </div>
 
         {/* Photo strip */}
         {photos.length > 0 && (
-          <div className="flex gap-2 overflow-x-auto pb-1">
+          <div className="flex gap-2 overflow-x-auto pb-1 mt-2">
             {photos.map((p, i) => (
               <div key={p.id} className="relative flex-shrink-0">
                 <img
