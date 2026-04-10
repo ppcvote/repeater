@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy: #0D1B3E;
+  --color-navy-light: #162550;
+  --color-gold: #F5C842;
+  --color-gold-dim: #C9A235;
+  --color-rec: #EF4444;
+  --color-success: #10B981;
+  --color-bg: #111827;
+  --color-surface: #1F2937;
+  --color-surface-light: #374151;
+  --color-text: #F9FAFB;
+  --color-text-dim: #9CA3AF;
+  --font-sans: 'Noto Sans TC', system-ui, sans-serif;
+  --font-heading: 'Syne', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* REC indicator blink */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.animate-blink {
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* Smooth page transitions */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
