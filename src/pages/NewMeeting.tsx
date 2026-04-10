@@ -4,7 +4,6 @@ import { Camera, CameraOff, Mic, X, Check } from 'lucide-react'
 import { db, type Photo } from '../services/db'
 import { useMeetingStore } from '../store/meetingStore'
 import { processMeeting, type ProcessProgress } from '../services/processor'
-import { createFilteredStream } from '../services/audioFilter'
 
 function formatTime(sec: number) {
   const h = Math.floor(sec / 3600)
@@ -26,60 +25,49 @@ export default function NewMeeting() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const videoRef = useRef<HTMLVideoElement>(null)
-  const audioStreamRef = useRef<MediaStream | null>(null)
-  const videoStreamRef = useRef<MediaStream | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
   const meetingIdRef = useRef<string>('')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const recordingStartRef = useRef<number>(0)
-  const analyserRef = useRef<AnalyserNode | null>(null)
   const animFrameRef = useRef<number>(0)
-  const filterCleanupRef = useRef<(() => void) | null>(null)
 
-  // Audio level monitoring for waveform visualization
-  const startAudioMonitor = (analyser: AnalyserNode) => {
-    analyserRef.current = analyser
-    const data = new Uint8Array(analyser.frequencyBinCount)
-    const update = () => {
-      analyser.getByteFrequencyData(data)
-      const avg = data.reduce((a, b) => a + b, 0) / data.length
-      setAudioLevel(avg / 255)
-      animFrameRef.current = requestAnimationFrame(update)
-    }
-    update()
+  // Simple audio level monitor (no AudioContext dependency for recording)
+  const startAudioMonitor = (stream: MediaStream) => {
+    try {
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+
+      const data = new Uint8Array(analyser.frequencyBinCount)
+      const update = () => {
+        analyser.getByteFrequencyData(data)
+        const avg = data.reduce((a, b) => a + b, 0) / data.length
+        setAudioLevel(avg / 255)
+        animFrameRef.current = requestAnimationFrame(update)
+      }
+      update()
+    } catch { /* AudioContext not supported, waveform won't animate */ }
   }
 
-  // Start recording — audio only by default
+  // Start recording
   const handleStart = async () => {
     meetingIdRef.current = crypto.randomUUID()
     audioChunksRef.current = []
     recordingStartRef.current = Date.now()
 
     try {
-      // iOS Safari: MUST request audio+video together in one call
-      // Video track starts disabled (saves battery), enabled when user opens camera
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-      })
-
-      // Disable video track immediately (camera off by default)
-      stream.getVideoTracks().forEach(t => { t.enabled = false })
-
-      audioStreamRef.current = stream
-      videoStreamRef.current = stream
-
-      // Apply noise reduction filter to audio
-      const audioOnly = new MediaStream(stream.getAudioTracks())
-      const { filteredStream, analyser, cleanup } = createFilteredStream(audioOnly)
-      filterCleanupRef.current = cleanup
+      // Request audio only to start — simple and reliable on all platforms
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
 
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
           ? 'audio/mp4'
           : ''
-      // Record the filtered audio (noise-reduced)
-      const recorder = new MediaRecorder(filteredStream, mimeType ? { mimeType } : undefined)
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
@@ -88,34 +76,12 @@ export default function NewMeeting() {
       recorder.start(1000)
       mediaRecorderRef.current = recorder
 
-      startAudioMonitor(analyser)
+      // Audio monitor for waveform (separate, doesn't affect recording)
+      startAudioMonitor(stream)
     } catch (err) {
-      console.error('Permission error:', err)
-      // Fallback: try audio-only if camera denied
-      try {
-        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        audioStreamRef.current = audioStream
-
-        const { filteredStream, analyser, cleanup } = createFilteredStream(audioStream)
-        filterCleanupRef.current = cleanup
-
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : MediaRecorder.isTypeSupported('audio/mp4')
-            ? 'audio/mp4'
-            : ''
-        const recorder = new MediaRecorder(filteredStream, mimeType ? { mimeType } : undefined)
-        recorder.ondataavailable = (e) => {
-          if (e.data.size > 0) audioChunksRef.current.push(e.data)
-        }
-        recorder.start(1000)
-        mediaRecorderRef.current = recorder
-        startAudioMonitor(analyser)
-      } catch (err2) {
-        console.error('Mic error:', err2)
-        alert('無法存取麥克風，請到設定中允許權限後重試。')
-        return
-      }
+      console.error('Mic error:', err)
+      alert('無法存取麥克風，請到設定中允許權限後重試。')
+      return
     }
 
     startRecording()
@@ -130,70 +96,36 @@ export default function NewMeeting() {
     })
   }
 
-  // Pinch-to-zoom on camera
-  const handleZoom = async (scale: number) => {
-    const stream = videoStreamRef.current
-    if (!stream) return
-    const track = stream.getVideoTracks()[0]
-    if (!track) return
-    try {
-      const capabilities = track.getCapabilities() as any
-      if (capabilities.zoom) {
-        const min = capabilities.zoom.min || 1
-        const max = capabilities.zoom.max || 5
-        const zoom = Math.min(max, Math.max(min, scale))
-        await track.applyConstraints({ advanced: [{ zoom } as any] })
-      }
-    } catch { /* zoom not supported */ }
-  }
+  // Toggle camera — opens/closes a SEPARATE video stream (doesn't touch audio)
+  const cameraStreamRef = useRef<MediaStream | null>(null)
 
-  const pinchRef = useRef({ startDist: 0, startZoom: 1, currentZoom: 1 })
-
-  const onTouchStart = (e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX
-      const dy = e.touches[0].clientY - e.touches[1].clientY
-      pinchRef.current.startDist = Math.hypot(dx, dy)
-      pinchRef.current.startZoom = pinchRef.current.currentZoom
-    }
-  }
-
-  const onTouchMove = (e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX
-      const dy = e.touches[0].clientY - e.touches[1].clientY
-      const dist = Math.hypot(dx, dy)
-      const scale = (dist / pinchRef.current.startDist) * pinchRef.current.startZoom
-      pinchRef.current.currentZoom = scale
-      handleZoom(scale)
-    }
-  }
-
-  // Toggle camera on/off — just enable/disable existing video track (no new getUserMedia)
   const toggleCamera = async () => {
-    const stream = videoStreamRef.current
-    if (!stream || stream.getVideoTracks().length === 0) {
-      alert('相機不可用（可能啟動時未授權相機權限）')
-      return
-    }
-
     if (cameraOn) {
-      stream.getVideoTracks().forEach(t => { t.enabled = false })
+      cameraStreamRef.current?.getTracks().forEach(t => t.stop())
+      cameraStreamRef.current = null
       if (videoRef.current) videoRef.current.srcObject = null
       setCameraOn(false)
     } else {
-      stream.getVideoTracks().forEach(t => { t.enabled = true })
-      if (videoRef.current) {
-        videoRef.current.srcObject = new MediaStream(stream.getVideoTracks())
-        await videoRef.current.play().catch(() => {})
+      try {
+        const vStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+        })
+        cameraStreamRef.current = vStream
+        if (videoRef.current) {
+          videoRef.current.srcObject = vStream
+          await videoRef.current.play().catch(() => {})
+        }
+        setCameraOn(true)
+      } catch (err) {
+        console.error('Camera error:', err)
+        alert('無法開啟相機，請檢查權限設定。')
       }
-      setCameraOn(true)
     }
   }
 
   // Take photo
   const handlePhoto = () => {
-    if (!videoRef.current || !videoStreamRef.current) return
+    if (!videoRef.current || !cameraStreamRef.current) return
 
     const video = videoRef.current
     const canvas = document.createElement('canvas')
@@ -226,19 +158,50 @@ export default function NewMeeting() {
     }, 'image/jpeg', 0.85)
   }
 
+  // Pinch-to-zoom
+  const pinchRef = useRef({ startDist: 0, startZoom: 1, currentZoom: 1 })
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      pinchRef.current.startDist = Math.hypot(dx, dy)
+      pinchRef.current.startZoom = pinchRef.current.currentZoom
+    }
+  }
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && cameraStreamRef.current) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      const dist = Math.hypot(dx, dy)
+      const scale = (dist / pinchRef.current.startDist) * pinchRef.current.startZoom
+      pinchRef.current.currentZoom = scale
+      const track = cameraStreamRef.current.getVideoTracks()[0]
+      if (track) {
+        try {
+          const cap = track.getCapabilities() as any
+          if (cap.zoom) {
+            const zoom = Math.min(cap.zoom.max || 5, Math.max(cap.zoom.min || 1, scale))
+            track.applyConstraints({ advanced: [{ zoom } as any] })
+          }
+        } catch { /* zoom not supported */ }
+      }
+    }
+  }
+
   // Stop recording
   const handleStop = async () => {
     setShowConfirmStop(false)
 
     if (timerRef.current) clearInterval(timerRef.current)
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
-    filterCleanupRef.current?.()
 
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop()
     }
-    audioStreamRef.current?.getTracks().forEach(t => t.stop())
-    videoStreamRef.current?.getTracks().forEach(t => t.stop())
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    cameraStreamRef.current?.getTracks().forEach(t => t.stop())
 
     stopRecording()
     setCameraOn(false)
@@ -275,16 +238,15 @@ export default function NewMeeting() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
-      filterCleanupRef.current?.()
-      audioStreamRef.current?.getTracks().forEach(t => t.stop())
-      videoStreamRef.current?.getTracks().forEach(t => t.stop())
+      streamRef.current?.getTracks().forEach(t => t.stop())
+      cameraStreamRef.current?.getTracks().forEach(t => t.stop())
       if (mediaRecorderRef.current?.state === 'recording') {
         mediaRecorderRef.current.stop()
       }
     }
   }, [])
 
-  // Processing screen
+  // ====== Processing screen ======
   if (processing) {
     return (
       <div className="animate-fadeIn flex flex-col items-center justify-center min-h-dvh p-6 max-w-lg mx-auto">
@@ -338,7 +300,7 @@ export default function NewMeeting() {
     )
   }
 
-  // Not recording yet — start screen
+  // ====== Start screen ======
   if (!isRecording) {
     return (
       <div className="animate-fadeIn flex flex-col items-center justify-center min-h-dvh p-6 max-w-lg mx-auto">
@@ -382,7 +344,7 @@ export default function NewMeeting() {
         </button>
       </div>
 
-      {/* Main area: Camera OR Audio Visualizer */}
+      {/* Main area */}
       <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
         {cameraOn ? (
           <>
@@ -395,16 +357,14 @@ export default function NewMeeting() {
               onTouchStart={onTouchStart}
               onTouchMove={onTouchMove}
             />
-            {/* Photo count overlay */}
             <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1 flex items-center gap-1.5">
               <Camera className="w-4 h-4 text-white" />
               <span className="text-white text-sm font-bold">{photoCount}</span>
             </div>
           </>
         ) : (
-          /* Audio waveform visualizer */
           <div className="flex flex-col items-center justify-center gap-6 w-full px-8">
-            {/* Waveform bars */}
+            {/* Waveform */}
             <div className="flex items-center justify-center gap-1 h-32">
               {Array.from({ length: 32 }).map((_, i) => {
                 const dist = Math.abs(i - 16) / 16
@@ -420,7 +380,6 @@ export default function NewMeeting() {
               })}
             </div>
 
-            {/* Timer */}
             <div className="flex items-center gap-3">
               <span className="w-3 h-3 rounded-full bg-rec animate-blink" />
               <span className="font-mono text-3xl font-bold text-text tracking-wider">
@@ -430,7 +389,6 @@ export default function NewMeeting() {
 
             <p className="text-text-dim text-sm">錄音中，可以專心聽講</p>
 
-            {/* Photo count if any */}
             {photoCount > 0 && (
               <p className="text-text-dim text-xs flex items-center gap-1">
                 <Camera className="w-3 h-3" /> 已拍 {photoCount} 張投影片
@@ -442,34 +400,24 @@ export default function NewMeeting() {
 
       {/* Bottom bar */}
       <div className="bg-surface p-3 pb-[env(safe-area-inset-bottom,12px)]">
-        {/* Controls row */}
         <div className="flex items-center justify-between mb-2">
-          {/* Timer (compact, shown when camera is on) */}
-          {cameraOn && (
+          {cameraOn ? (
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-rec animate-blink" />
-              <span className="font-mono text-sm font-bold text-text">
-                REC {formatTime(elapsedSeconds)}
-              </span>
+              <span className="font-mono text-sm font-bold text-text">REC {formatTime(elapsedSeconds)}</span>
             </div>
-          )}
-          {!cameraOn && <div />}
+          ) : <div />}
 
-          {/* Action buttons */}
           <div className="flex items-center gap-3">
-            {/* Camera toggle */}
             <button
               onClick={toggleCamera}
               className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
-                cameraOn
-                  ? 'bg-gold/20 text-gold'
-                  : 'bg-surface-light text-text-dim'
+                cameraOn ? 'bg-gold/20 text-gold' : 'bg-surface-light text-text-dim'
               }`}
             >
               {cameraOn ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
             </button>
 
-            {/* Shutter button (only when camera is on) */}
             {cameraOn && (
               <button
                 onClick={handlePhoto}
@@ -481,7 +429,6 @@ export default function NewMeeting() {
           </div>
         </div>
 
-        {/* Photo strip */}
         {photos.length > 0 && (
           <div className="flex gap-2 overflow-x-auto pb-1 mt-2">
             {photos.map((p, i) => (
@@ -500,7 +447,7 @@ export default function NewMeeting() {
         )}
       </div>
 
-      {/* Confirm stop modal */}
+      {/* Confirm stop */}
       {showConfirmStop && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-surface rounded-2xl p-6 w-full max-w-sm">
