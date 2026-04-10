@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camera Test</title>
+<style>
+body { background: #111; color: #fff; font-family: sans-serif; padding: 20px; }
+video { width: 100%; max-height: 60vh; background: #333; border-radius: 12px; }
+button { padding: 15px 30px; font-size: 18px; margin: 10px 5px; border-radius: 8px; border: none; }
+.log { font-family: monospace; font-size: 12px; background: #222; padding: 10px; border-radius: 8px; margin-top: 10px; white-space: pre-wrap; max-height: 30vh; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h2>Camera Test</h2>
+<video id="v" autoplay playsinline muted></video>
+<br>
+<button onclick="testAudioOnly()" style="background:#F5C842;color:#000;">1. Audio Only</button>
+<button onclick="testVideoOnly()" style="background:#10B981;color:#fff;">2. Video Only</button>
+<button onclick="testBoth()" style="background:#8B5CF6;color:#fff;">3. Both</button>
+<button onclick="stopAll()" style="background:#EF4444;color:#fff;">Stop</button>
+<div class="log" id="log"></div>
+
+<script>
+const v = document.getElementById('v');
+const logEl = document.getElementById('log');
+let streams = [];
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+  console.log(msg);
+}
+
+function stopAll() {
+  streams.forEach(s => s.getTracks().forEach(t => t.stop()));
+  streams = [];
+  v.srcObject = null;
+  log('Stopped all streams');
+}
+
+async function testAudioOnly() {
+  try {
+    log('Requesting audio...');
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streams.push(s);
+    log('Audio OK: ' + s.getAudioTracks().length + ' tracks');
+  } catch(e) {
+    log('Audio FAIL: ' + e.name + ' ' + e.message);
+  }
+}
+
+async function testVideoOnly() {
+  try {
+    log('Requesting video...');
+    const s = await navigator.mediaDevices.getUserMedia({ 
+      video: { facingMode: 'environment' } 
+    });
+    streams.push(s);
+    v.srcObject = s;
+    await v.play();
+    log('Video OK: ' + s.getVideoTracks().length + ' tracks, ' + 
+        s.getVideoTracks()[0].getSettings().width + 'x' + 
+        s.getVideoTracks()[0].getSettings().height);
+  } catch(e) {
+    log('Video FAIL: ' + e.name + ' ' + e.message);
+  }
+}
+
+async function testBoth() {
+  try {
+    log('Requesting audio+video...');
+    const s = await navigator.mediaDevices.getUserMedia({ 
+      audio: true, 
+      video: { facingMode: 'environment' } 
+    });
+    streams.push(s);
+    v.srcObject = s;
+    await v.play();
+    log('Both OK: audio=' + s.getAudioTracks().length + 
+        ' video=' + s.getVideoTracks().length +
+        ' ' + s.getVideoTracks()[0].getSettings().width + 'x' + 
+        s.getVideoTracks()[0].getSettings().height);
+  } catch(e) {
+    log('Both FAIL: ' + e.name + ' ' + e.message);
+  }
+}
+
+log('Ready. Device: ' + navigator.userAgent.slice(-50));
+</script>
+</body>
+</html>
