@@ -61,15 +61,27 @@ export default function NewMeeting() {
     recordingStartRef.current = Date.now()
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // iOS Safari: MUST request audio+video together in one call
+      // Video track starts disabled (saves battery), enabled when user opens camera
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      })
+
+      // Disable video track immediately (camera off by default)
+      stream.getVideoTracks().forEach(t => { t.enabled = false })
+
       audioStreamRef.current = stream
+      videoStreamRef.current = stream // same stream, video just disabled
 
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
           ? 'audio/mp4'
           : ''
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      // Record only audio tracks
+      const audioOnly = new MediaStream(stream.getAudioTracks())
+      const recorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined)
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
@@ -78,11 +90,31 @@ export default function NewMeeting() {
       recorder.start(1000)
       mediaRecorderRef.current = recorder
 
-      startAudioMonitor(stream)
+      startAudioMonitor(audioOnly)
     } catch (err) {
-      console.error('Mic error:', err)
-      alert('無法存取麥克風，請到設定中允許權限後重試。')
-      return
+      console.error('Permission error:', err)
+      // Fallback: try audio-only if camera denied
+      try {
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        audioStreamRef.current = audioStream
+
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+            ? 'audio/mp4'
+            : ''
+        const recorder = new MediaRecorder(audioStream, mimeType ? { mimeType } : undefined)
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        }
+        recorder.start(1000)
+        mediaRecorderRef.current = recorder
+        startAudioMonitor(audioStream)
+      } catch (err2) {
+        console.error('Mic error:', err2)
+        alert('無法存取麥克風，請到設定中允許權限後重試。')
+        return
+      }
     }
 
     startRecording()
@@ -97,30 +129,25 @@ export default function NewMeeting() {
     })
   }
 
-  // Toggle camera on/off
+  // Toggle camera on/off — just enable/disable existing video track (no new getUserMedia)
   const toggleCamera = async () => {
+    const stream = videoStreamRef.current
+    if (!stream || stream.getVideoTracks().length === 0) {
+      alert('相機不可用（可能啟動時未授權相機權限）')
+      return
+    }
+
     if (cameraOn) {
-      // Turn off camera
-      videoStreamRef.current?.getTracks().forEach(t => t.stop())
-      videoStreamRef.current = null
+      stream.getVideoTracks().forEach(t => { t.enabled = false })
       if (videoRef.current) videoRef.current.srcObject = null
       setCameraOn(false)
     } else {
-      // Turn on camera
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-        })
-        videoStreamRef.current = stream
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          await videoRef.current.play().catch(() => {})
-        }
-        setCameraOn(true)
-      } catch (err) {
-        console.error('Camera error:', err)
-        alert('無法開啟相機，請檢查權限設定。')
+      stream.getVideoTracks().forEach(t => { t.enabled = true })
+      if (videoRef.current) {
+        videoRef.current.srcObject = new MediaStream(stream.getVideoTracks())
+        await videoRef.current.play().catch(() => {})
       }
+      setCameraOn(true)
     }
   }
 

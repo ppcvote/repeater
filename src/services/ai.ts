@@ -33,13 +33,13 @@ export async function generateSummary(transcript: string): Promise<{
   actionItems: string[]
   raw: string
 }> {
-  const system = '你是一個會議記錄助理，擅長整理台灣金融業說明會內容。請用繁體中文回覆。'
-  const user = `以下是一場會議的完整逐字稿，請提供：
+  const system = '你是一個會議記錄助理，擅長整理台灣金融業說明會內容。所有輸出必須使用繁體中文（臺灣用語）。'
+  const user = `以下是一場會議的完整逐字稿，請用繁體中文提供：
 1. 重點摘要（5-8個條列，每個20-40字）
 2. 關鍵數據（有提到的數字、百分比、產品名稱）
 3. 待辦事項（如果有的話）
 
-請用以下JSON格式回覆（不要markdown code block）：
+請用以下JSON格式回覆（不要markdown code block，不要輸出任何提示語句，只輸出JSON）：
 {
   "keyPoints": ["重點1", "重點2", ...],
   "actionItems": ["待辦1", "待辦2", ...],

@@ -20,7 +20,8 @@ async function transcribeChunk(blob: Blob, offset: number = 0): Promise<WhisperR
   formData.append('response_format', 'verbose_json')
   formData.append('timestamp_granularities[]', 'segment')
   // Prompt hints Whisper to output Traditional Chinese (繁體中文)
-  formData.append('prompt', '以下是繁體中文的會議錄音逐字稿。請使用繁體中文輸出。')
+  // Use natural text that won't appear as a prefix in the output
+  formData.append('prompt', '這是一場在臺灣舉辦的會議。')
 
   const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',
@@ -35,16 +36,22 @@ async function transcribeChunk(blob: Blob, offset: number = 0): Promise<WhisperR
 
   const data = await res.json()
 
+  // Clean up: remove Whisper prompt leakage from output
+  const cleanText = (t: string) => t
+    ?.replace(/這是一場在臺灣舉辦的會議。?/g, '')
+    ?.replace(/請使用繁體中文輸出。?/g, '')
+    ?.trim() || ''
+
   // Adjust timestamps by offset for chunked audio
   const segments: WhisperSegment[] = (data.segments || []).map((s: any) => ({
     start: s.start + offset,
     end: s.end + offset,
-    text: s.text?.trim() || '',
+    text: cleanText(s.text),
   }))
 
   return {
-    text: data.text || '',
-    segments,
+    text: cleanText(data.text),
+    segments: segments.filter(s => s.text.length > 0),
   }
 }
 
