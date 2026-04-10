@@ -1,0 +1,22 @@
+{
+  "name": "Repeater — 會議重播器",
+  "short_name": "Repeater",
+  "description": "會議錄音 → 逐字稿 → AI摘要 → 簡報",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

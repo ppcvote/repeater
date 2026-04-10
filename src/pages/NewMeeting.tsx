@@ -53,11 +53,13 @@ export default function NewMeeting() {
     // Start microphone recording
     try {
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const recorder = new MediaRecorder(audioStream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : 'audio/webm',
-      })
+      // iOS Safari doesn't support webm — fallback to mp4 or default
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : ''
+      const recorder = new MediaRecorder(audioStream, mimeType ? { mimeType } : undefined)
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
@@ -144,8 +146,9 @@ export default function NewMeeting() {
     // Wait a tick for final data
     await new Promise(r => setTimeout(r, 500))
 
-    // Save audio
-    const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+    // Save audio — use recorder's actual mimeType for correct format
+    const recorderMime = mediaRecorderRef.current?.mimeType || 'audio/webm'
+    const audioBlob = new Blob(audioChunksRef.current, { type: recorderMime })
     const duration = Math.floor((Date.now() - recordingStartRef.current) / 1000)
 
     await db.meetings.update(meetingIdRef.current, {
@@ -299,26 +302,24 @@ export default function NewMeeting() {
           <Camera className="w-4 h-4 text-white" />
           <span className="text-white text-sm font-bold">{photoCount}</span>
         </div>
-
-        {/* Shutter button */}
-        <div className="absolute bottom-4 right-4">
-          <button
-            onClick={handlePhoto}
-            className="w-16 h-16 rounded-full bg-white/90 border-4 border-white flex items-center justify-center active:scale-90 transition-transform shadow-lg"
-          >
-            <Camera className="w-7 h-7 text-navy" />
-          </button>
-        </div>
       </div>
 
-      {/* Bottom: Timer + Photo strip */}
-      <div className="bg-surface p-3">
-        {/* Timer */}
-        <div className="flex items-center justify-center gap-2 mb-3">
-          <span className="w-3 h-3 rounded-full bg-rec animate-blink" />
-          <span className="font-mono text-lg font-bold text-text tracking-wider">
-            REC {formatTime(elapsedSeconds)}
-          </span>
+      {/* Bottom: Timer + Shutter + Photo strip */}
+      <div className="bg-surface p-3 pb-[env(safe-area-inset-bottom,12px)]">
+        {/* Timer + Shutter row */}
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full bg-rec animate-blink" />
+            <span className="font-mono text-lg font-bold text-text tracking-wider">
+              REC {formatTime(elapsedSeconds)}
+            </span>
+          </div>
+          <button
+            onClick={handlePhoto}
+            className="w-14 h-14 rounded-full bg-white/90 border-4 border-white flex items-center justify-center active:scale-90 transition-transform shadow-lg"
+          >
+            <Camera className="w-6 h-6 text-navy" />
+          </button>
         </div>
 
         {/* Photo strip */}
