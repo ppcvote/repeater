@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Camera, Mic, X, Check } from 'lucide-react'
 import { db, type Photo } from '../services/db'
@@ -28,53 +28,47 @@ export default function NewMeeting() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const recordingStartRef = useRef<number>(0)
 
-  // Camera setup
-  const startCamera = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false,
-      })
-      streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-      }
-    } catch (err) {
-      console.error('Camera error:', err)
-    }
-  }, [])
-
-  // Start recording
+  // Start recording — request camera + mic in ONE getUserMedia call (iOS requires this)
   const handleStart = async () => {
     meetingIdRef.current = crypto.randomUUID()
     audioChunksRef.current = []
     recordingStartRef.current = Date.now()
 
-    // Start microphone recording
     try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      // iOS Safari doesn't support webm — fallback to mp4 or default
+      // iOS Safari: MUST request audio + video together, separate calls cause black screen
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      })
+
+      // Set up camera preview
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        await videoRef.current.play().catch(() => {}) // iOS needs explicit play()
+      }
+
+      // Set up audio recording from the same stream
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/mp4')
           ? 'audio/mp4'
           : ''
-      const recorder = new MediaRecorder(audioStream, mimeType ? { mimeType } : undefined)
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
       }
 
-      recorder.start(1000) // collect data every 1s
+      recorder.start(1000)
       mediaRecorderRef.current = recorder
     } catch (err) {
-      console.error('Mic error:', err)
-      alert('無法存取麥克風，請檢查權限設定。')
+      console.error('Permission error:', err)
+      alert('無法存取相機或麥克風，請到設定中允許權限後重試。')
       return
     }
 
     startRecording()
-    await startCamera()
 
     // Timer
     timerRef.current = setInterval(tick, 1000)
@@ -132,13 +126,10 @@ export default function NewMeeting() {
     // Stop timer
     if (timerRef.current) clearInterval(timerRef.current)
 
-    // Stop recorder
+    // Stop recorder and all tracks (audio + video are on same stream)
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop()
-      mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop())
     }
-
-    // Stop camera
     streamRef.current?.getTracks().forEach(t => t.stop())
 
     stopRecording()
