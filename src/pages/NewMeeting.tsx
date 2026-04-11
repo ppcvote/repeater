@@ -346,22 +346,22 @@ export default function NewMeeting() {
 
       {/* Main area */}
       <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+        {/* Video element ALWAYS rendered (hidden when camera off) — fixes ref being null */}
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`absolute inset-0 w-full h-full object-cover touch-none ${cameraOn ? '' : 'hidden'}`}
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+        />
+
         {cameraOn ? (
-          <>
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover touch-none"
-              onTouchStart={onTouchStart}
-              onTouchMove={onTouchMove}
-            />
-            <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1 flex items-center gap-1.5">
-              <Camera className="w-4 h-4 text-white" />
-              <span className="text-white text-sm font-bold">{photoCount}</span>
-            </div>
-          </>
+          <div className="absolute top-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-3 py-1 flex items-center gap-1.5 z-10">
+            <Camera className="w-4 h-4 text-white" />
+            <span className="text-white text-sm font-bold">{photoCount}</span>
+          </div>
         ) : (
           <div className="flex flex-col items-center justify-center gap-6 w-full px-8">
             {/* Waveform */}
