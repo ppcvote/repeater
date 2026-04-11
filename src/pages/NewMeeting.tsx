@@ -12,6 +12,8 @@ function formatTime(sec: number) {
   return `${h > 0 ? String(h).padStart(2, '0') + ':' : ''}${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+
 export default function NewMeeting() {
   const navigate = useNavigate()
   const { isRecording, elapsedSeconds, photoCount, processing, startRecording, stopRecording, tick, addPhoto, setProcessing } = useMeetingStore()
@@ -58,30 +60,65 @@ export default function NewMeeting() {
     recordingStartRef.current = Date.now()
 
     try {
-      // Request audio only to start — simple and reliable on all platforms
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
+      if (isIOS) {
+        // iOS: request audio+video together (only chance to get both permissions)
+        // Video track is hidden initially but stream is ready for when user opens camera
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+        })
+        streamRef.current = stream
+        cameraStreamRef.current = stream // same stream on iOS
 
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/mp4')
-          ? 'audio/mp4'
+        // Record audio tracks only
+        const audioTracks = new MediaStream(stream.getAudioTracks())
+        const recorder = new MediaRecorder(audioTracks)
+
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        }
+
+        recorder.start(1000)
+        mediaRecorderRef.current = recorder
+
+        startAudioMonitor(audioTracks)
+      } else {
+        // Android/Desktop: audio only, camera opened separately when needed
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        streamRef.current = stream
+
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
           : ''
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        }
+
+        recorder.start(1000)
+        mediaRecorderRef.current = recorder
+
+        startAudioMonitor(stream)
       }
-
-      recorder.start(1000)
-      mediaRecorderRef.current = recorder
-
-      // Audio monitor for waveform (separate, doesn't affect recording)
-      startAudioMonitor(stream)
     } catch (err) {
-      console.error('Mic error:', err)
-      alert('無法存取麥克風，請到設定中允許權限後重試。')
-      return
+      console.error('Permission error:', err)
+      // iOS fallback: if user denied camera, try audio only
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        streamRef.current = stream
+        const recorder = new MediaRecorder(stream)
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        }
+        recorder.start(1000)
+        mediaRecorderRef.current = recorder
+        startAudioMonitor(stream)
+      } catch (err2) {
+        console.error('Mic error:', err2)
+        alert('無法存取麥克風，請到設定中允許權限後重試。')
+        return
+      }
     }
 
     startRecording()
@@ -96,24 +133,36 @@ export default function NewMeeting() {
     })
   }
 
-  // Toggle camera — opens/closes a SEPARATE video stream (doesn't touch audio)
+  // Toggle camera
   const cameraStreamRef = useRef<MediaStream | null>(null)
 
   const toggleCamera = async () => {
     if (cameraOn) {
-      cameraStreamRef.current?.getTracks().forEach(t => t.stop())
-      cameraStreamRef.current = null
+      // Turn off camera view (on iOS, don't stop the track — just hide video)
       if (videoRef.current) videoRef.current.srcObject = null
+      if (!isIOS) {
+        cameraStreamRef.current?.getTracks().forEach(t => t.stop())
+        cameraStreamRef.current = null
+      }
       setCameraOn(false)
     } else {
       try {
-        const vStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-        })
-        cameraStreamRef.current = vStream
-        if (videoRef.current) {
-          videoRef.current.srcObject = vStream
-          await videoRef.current.play().catch(() => {})
+        if (isIOS && streamRef.current) {
+          // iOS: reuse the stream from handleStart (already has video permission)
+          if (videoRef.current) {
+            videoRef.current.srcObject = new MediaStream(streamRef.current.getVideoTracks())
+            await videoRef.current.play().catch(() => {})
+          }
+        } else {
+          // Android/Desktop: open new video stream
+          const vStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+          })
+          cameraStreamRef.current = vStream
+          if (videoRef.current) {
+            videoRef.current.srcObject = vStream
+            await videoRef.current.play().catch(() => {})
+          }
         }
         setCameraOn(true)
       } catch (err) {
@@ -125,7 +174,7 @@ export default function NewMeeting() {
 
   // Take photo
   const handlePhoto = () => {
-    if (!videoRef.current || !cameraStreamRef.current) return
+    if (!videoRef.current || (!cameraStreamRef.current && !streamRef.current)) return
 
     const video = videoRef.current
     const canvas = document.createElement('canvas')
